@@ -1,12 +1,14 @@
 const HOLDINGS_KEY = 'stockresearch.holdings.v1';
 const API_KEY_STORAGE_KEY = 'stockresearch.alphaVantageApiKey.v1';
 const RISK_FREE_RATE = 0.025;
-const APP_VERSION = '2026-06-17 Alpha Vantage prices + multi-source news';
+const APP_VERSION = '2026-06-17 Alpha Vantage diagnostics update';
 const starterHoldings = [{ id: crypto.randomUUID(), ticker: 'AAPL' }, { id: crypto.randomUUID(), ticker: 'MSFT' }, { id: crypto.randomUUID(), ticker: 'NVDA' }];
 
 let holdings = loadHoldings();
 let snapshots = {};
 let newsItems = [];
+let priceErrors = {};
+let appMessages = [];
 let isLoading = false;
 let alphaVantageApiKey = localStorage.getItem(API_KEY_STORAGE_KEY) ?? '';
 let selectedTicker = holdings[0]?.ticker ?? 'AAPL';
@@ -57,14 +59,36 @@ function alphaVantageUrl(params) {
   return url;
 }
 
+function addFeedback(type, text) {
+  appMessages = [{ type, text, at: new Date().toISOString() }, ...appMessages].slice(0, 6);
+}
+
+function setPriceError(ticker, error) {
+  priceErrors[ticker] = error;
+}
+
 async function fetchAlphaVantageDaily(ticker) {
-  if (!alphaVantageApiKey) return null;
+  if (!alphaVantageApiKey) {
+    setPriceError(ticker, 'No Alpha Vantage API key saved in this browser.');
+    return null;
+  }
   const url = alphaVantageUrl({ function: 'TIME_SERIES_DAILY', symbol: ticker, outputsize: 'full' });
   const response = await fetch(url);
-  if (!response.ok) return null;
+  if (!response.ok) {
+    setPriceError(ticker, `Alpha Vantage HTTP error ${response.status}.`);
+    return null;
+  }
   const payload = await response.json();
+  const apiMessage = payload.Note || payload.Information || payload['Error Message'];
+  if (apiMessage) {
+    setPriceError(ticker, apiMessage);
+    return await fetchAlphaVantageGlobalQuote(ticker);
+  }
   const series = payload['Time Series (Daily)'];
-  if (!series || payload.Note || payload.Information || payload['Error Message']) return null;
+  if (!series) {
+    setPriceError(ticker, 'Alpha Vantage response did not include Time Series (Daily). Trying Global Quote fallback.');
+    return await fetchAlphaVantageGlobalQuote(ticker);
+  }
 
   const history = Object.entries(series)
     .map(([date, values]) => ({ date, close: Number(values['4. close']) }))
@@ -73,7 +97,10 @@ async function fetchAlphaVantageDaily(ticker) {
 
   const latest = history.at(-1);
   const previous = history.at(-2) ?? latest;
-  if (!latest) return null;
+  if (!latest) {
+    setPriceError(ticker, 'Alpha Vantage returned no daily close prices.');
+    return await fetchAlphaVantageGlobalQuote(ticker);
+  }
 
   return {
     ticker,
@@ -88,10 +115,59 @@ async function fetchAlphaVantageDaily(ticker) {
   };
 }
 
+async function fetchAlphaVantageGlobalQuote(ticker) {
+  if (!alphaVantageApiKey) return null;
+  try {
+    const url = alphaVantageUrl({ function: 'GLOBAL_QUOTE', symbol: ticker });
+    const response = await fetch(url);
+    if (!response.ok) {
+      setPriceError(ticker, `Global Quote HTTP error ${response.status}.`);
+      return null;
+    }
+    const payload = await response.json();
+    const apiMessage = payload.Note || payload.Information || payload['Error Message'];
+    if (apiMessage) {
+      setPriceError(ticker, apiMessage);
+      return null;
+    }
+    const quote = payload['Global Quote'];
+    const price = Number(quote?.['05. price']);
+    const previousClose = Number(quote?.['08. previous close']) || price;
+    const tradingDay = quote?.['07. latest trading day'] ?? new Date().toISOString().slice(0, 10);
+    if (!Number.isFinite(price)) {
+      setPriceError(ticker, 'Alpha Vantage Global Quote returned no valid price. Confirm ticker symbol and API limit.');
+      return null;
+    }
+    const previousDate = new Date(tradingDay);
+    previousDate.setDate(previousDate.getDate() - 1);
+    delete priceErrors[ticker];
+    return {
+      ticker,
+      quoteSymbol: ticker,
+      currency: 'native',
+      price: Number(price.toFixed(2)),
+      previousClose: Number(previousClose.toFixed(2)),
+      changePercent: previousClose ? Number((((price - previousClose) / previousClose) * 100).toFixed(2)) : 0,
+      history: [
+        { date: previousDate.toISOString().slice(0, 10), close: Number(previousClose.toFixed(2)) },
+        { date: tradingDay, close: Number(price.toFixed(2)) },
+      ],
+      source: `Alpha Vantage GLOBAL_QUOTE (${ticker})`,
+      updatedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    setPriceError(ticker, `Network/CORS error while loading Global Quote: ${error.message}`);
+    return null;
+  }
+}
+
 async function getQuoteSnapshot(ticker) {
   try {
-    return await fetchAlphaVantageDaily(ticker);
-  } catch {
+    const snapshot = await fetchAlphaVantageDaily(ticker);
+    if (snapshot) delete priceErrors[ticker];
+    return snapshot;
+  } catch (error) {
+    setPriceError(ticker, `Network/CORS error while loading daily prices: ${error.message}`);
     return null;
   }
 }
@@ -318,11 +394,15 @@ function buildNews(tickers) {
 
 async function loadQuotes() {
   isLoading = true;
+  priceErrors = {};
   render();
   const tickers = Array.from(new Set([...getTickers(), 'SPY']));
   const entries = await Promise.all(tickers.map(async (symbol) => [symbol, await getQuoteSnapshot(symbol)]));
   snapshots = Object.fromEntries(entries);
   newsItems = await fetchAlphaVantageNews(getTickers());
+  const requested = getTickers().length;
+  const loaded = getTickers().filter((ticker) => snapshots[ticker]).length;
+  addFeedback(loaded ? 'success' : 'warning', `Loaded ${loaded}/${requested} portfolio prices from Alpha Vantage.`);
   isLoading = false;
   render();
 }
@@ -337,6 +417,7 @@ function addHolding(event) {
   holdings = [...holdings, { id: crypto.randomUUID(), ticker, shares: shares > 0 ? shares : undefined, averageCost: averageCost > 0 ? averageCost : undefined }];
   selectedTicker = ticker;
   saveHoldings();
+  addFeedback('success', `${ticker} added. Loading Alpha Vantage data.`);
   event.currentTarget.reset();
   loadQuotes();
 }
@@ -352,8 +433,13 @@ function saveAlphaVantageApiKey(event) {
   event.preventDefault();
   const formData = new FormData(event.currentTarget);
   alphaVantageApiKey = String(formData.get('alphaVantageApiKey') ?? '').trim();
-  if (alphaVantageApiKey) localStorage.setItem(API_KEY_STORAGE_KEY, alphaVantageApiKey);
-  else localStorage.removeItem(API_KEY_STORAGE_KEY);
+  if (alphaVantageApiKey) {
+    localStorage.setItem(API_KEY_STORAGE_KEY, alphaVantageApiKey);
+    addFeedback('success', 'Alpha Vantage API key saved locally. Reloading prices now.');
+  } else {
+    localStorage.removeItem(API_KEY_STORAGE_KEY);
+    addFeedback('warning', 'Alpha Vantage API key removed. Prices will not load until a key is saved.');
+  }
   loadQuotes();
 }
 
@@ -395,6 +481,7 @@ function renderDashboard(tickers, series, kpis, portfolioValue, costBasis, unrea
       </div>
       <div class="privacy-card"><strong>🛡️ Alpha Vantage data mode</strong><span>Prices now come from Alpha Vantage when an API key is saved locally. If no price is available, the dashboard shows no price instead of simulated data.</span></div>
     </section>
+    ${renderFeedback()}
     <section class="grid summary-grid" aria-label="Portfolio summary">
       ${summaryCard('Tracked symbols', String(tickers.length), 'Ticker-only mode is supported.')}
       ${summaryCard('Portfolio value', portfolioValue ? currency(portfolioValue) : 'Optional', 'Live quote mode; enter shares for wealth tracking.')}
@@ -466,6 +553,13 @@ function bindChartTooltip(container) {
   container.addEventListener('pointerleave', () => { tooltip.hidden = true; });
 }
 
+function renderFeedback() {
+  const errorItems = Object.entries(priceErrors).map(([ticker, error]) => ({ type: 'error', text: `${ticker}: ${error}` }));
+  const items = [...errorItems, ...appMessages];
+  if (!items.length) return '';
+  return `<section class="feedback-panel" aria-live="polite">${items.map((item) => `<div class="feedback-item ${escapeHtml(item.type)}"><strong>${escapeHtml(item.type.toUpperCase())}</strong><span>${escapeHtml(item.text)}</span></div>`).join('')}</section>`;
+}
+
 function summaryCard(label, value, detail) {
   return `<article class="summary-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><p>${escapeHtml(detail)}</p></article>`;
 }
@@ -475,7 +569,7 @@ function renderStockCard(holding) {
   const signal = snapshot ? buildSignal(snapshot) : null;
   const value = snapshot && holding.shares ? snapshot.price * holding.shares : null;
   return `<article class="stock-card">
-    <div class="stock-card-header"><div><h3>${escapeHtml(holding.ticker)}</h3><span>${escapeHtml(snapshot?.source ?? (alphaVantageApiKey ? 'No price available from Alpha Vantage' : 'Add Alpha Vantage API key to load prices'))}</span></div><button class="icon-button" type="button" aria-label="Remove ${escapeHtml(holding.ticker)}" data-remove="${escapeHtml(holding.id)}">🗑</button></div>
+    <div class="stock-card-header"><div><h3>${escapeHtml(holding.ticker)}</h3><span>${escapeHtml(snapshot?.source ?? priceErrors[holding.ticker] ?? (alphaVantageApiKey ? 'No price available from Alpha Vantage' : 'Add Alpha Vantage API key to load prices'))}</span></div><button class="icon-button" type="button" aria-label="Remove ${escapeHtml(holding.ticker)}" data-remove="${escapeHtml(holding.id)}">🗑</button></div>
     <div class="price-row"><strong>${snapshot ? currency(snapshot.price) : 'No price'}</strong>${snapshot ? `<span class="${snapshot.changePercent >= 0 ? 'positive' : 'negative'}">${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent}%</span>` : ''}</div>
     ${value ? `<p class="muted">Position value: ${currency(value)}</p>` : ''}
     ${signal ? `<div class="signal ${signal.tone}"><strong>${escapeHtml(signal.label)}</strong><span>Confidence: ${escapeHtml(signal.confidence)}</span><ul>${signal.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}</ul></div>` : ''}

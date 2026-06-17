@@ -511,3 +511,36 @@ select {
 @media (max-width: 620px) {
   .api-key-form { grid-template-columns: 1fr; }
 }
+
+.feedback-panel {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.feedback-item {
+  align-items: start;
+  border-radius: 16px;
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.85rem 1rem;
+}
+
+.feedback-item.success {
+  background: #eaf8f0;
+  color: #115d40;
+}
+
+.feedback-item.warning {
+  background: #fff8e7;
+  color: #7a5300;
+}
+
+.feedback-item.error {
+  background: #fff0ef;
+  color: #9a2b25;
+}
+
+.feedback-item span {
+  line-height: 1.45;
+}

@@ -14,8 +14,8 @@ A private-first MVP for tracking a stock watchlist or optional portfolio holding
 - Mobile-responsive static dashboard.
 - Ticker-only watchlist mode.
 - Optional shares and average cost for wealth tracking.
-- Alpha Vantage daily time-series price loading with no simulated price fallback when data is unavailable.
-- Daily movement cards with simple rule-based buy/hold/sell-style signals.
+- Alpha Vantage daily time-series price loading with Global Quote fallback, visible diagnostics, and no simulated price fallback when data is unavailable.
+- Daily movement cards with Alpha Vantage source/error messages and simple rule-based buy/hold/sell-style signals.
 - Portfolio KPI cards for performance, daily value at risk, beta, Sharpe ratio, and max drawdown.
 - Interactive portfolio performance SVG line chart with period controls and hover daily values.
 - Dedicated stock analysis page with selectable periods, hover daily values, close price, 20-day moving average, and Bollinger Bands.
@@ -53,7 +53,7 @@ See [`DEPLOYMENT.md`](./DEPLOYMENT.md) for step-by-step instructions and privacy
 
 ## Data-source notes
 
-The MVP uses browser-based Alpha Vantage TIME_SERIES_DAILY for prices and optional NEWS_SENTIMENT for financial news. Save the free API key locally in the browser; do not commit API keys to source code.
+The MVP uses browser-based Alpha Vantage TIME_SERIES_DAILY for prices, GLOBAL_QUOTE as a latest-price fallback, and optional NEWS_SENTIMENT for financial news. Save the free API key locally in the browser; do not commit API keys to source code.
 
 Potential future optional providers:
 
