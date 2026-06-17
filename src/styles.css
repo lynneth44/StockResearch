@@ -500,3 +500,14 @@ select {
 
   .period-controls { justify-content: flex-start; }
 }
+
+.api-key-form {
+  display: grid;
+  gap: 0.6rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin: 0.75rem 0;
+}
+
+@media (max-width: 620px) {
+  .api-key-form { grid-template-columns: 1fr; }
+}

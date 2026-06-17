@@ -14,7 +14,7 @@ A private-first MVP for tracking a stock watchlist or optional portfolio holding
 - Mobile-responsive static dashboard.
 - Ticker-only watchlist mode.
 - Optional shares and average cost for wealth tracking.
-- Exact ticker quote preference for stock prices to avoid wrong exchange aliases, with marked EUR demo fallback data when a browser quote source is unavailable.
+- Alpha Vantage daily time-series price loading with no simulated price fallback when data is unavailable.
 - Daily movement cards with simple rule-based buy/hold/sell-style signals.
 - Portfolio KPI cards for performance, daily value at risk, beta, Sharpe ratio, and max drawdown.
 - Interactive portfolio performance SVG line chart with period controls and hover daily values.
@@ -53,15 +53,15 @@ See [`DEPLOYMENT.md`](./DEPLOYMENT.md) for step-by-step instructions and privacy
 
 ## Data-source notes
 
-The MVP attempts browser-based Yahoo Finance chart endpoint loading and falls back to deterministic demo data when a provider is unavailable. For production-grade decisions, configure an official market-data provider through a server-side job or GitHub Actions secret so API keys are not exposed in browser code.
+The MVP uses browser-based Alpha Vantage TIME_SERIES_DAILY for prices and optional NEWS_SENTIMENT for financial news. Save the free API key locally in the browser; do not commit API keys to source code.
 
 Potential future optional providers:
 
-- Alpha Vantage for daily prices, indicators, and fundamentals.
-- Finnhub for company news, quotes, and financial data.
+- Alpha Vantage for daily prices and financial news sentiment.
+- Finnhub or other providers can be added later for alternative quotes, fundamentals, and news.
 
 Do not paste real API keys into the app, README, frontend code, or committed `.env` files.
 
 ## Disclaimer
 
-Signals and KPIs are educational decision-support indicators, not personalized financial advice. Quotes use the exact ticker first to avoid wrong exchange aliases and demo fallback data only when live browser quotes are unavailable; confirm market data with your broker or a trusted financial-data provider before making investment decisions.
+Signals and KPIs are educational decision-support indicators, not personalized financial advice. Quotes use Alpha Vantage when a local browser API key is configured. If no Alpha Vantage price is available, the app shows no price rather than simulated data; confirm market data with your broker or a trusted financial-data provider before making investment decisions.
