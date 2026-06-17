@@ -14,8 +14,8 @@ A private-first MVP for tracking a stock watchlist or optional portfolio holding
 - Mobile-responsive static dashboard.
 - Ticker-only watchlist mode.
 - Optional shares and average cost for wealth tracking.
-- Alpha Vantage daily time-series price loading with Global Quote fallback, visible diagnostics, and no simulated price fallback when data is unavailable.
-- Daily movement cards with Alpha Vantage source/error messages and simple rule-based buy/hold/sell-style signals.
+- Exact-ticker Yahoo one-year price history with cached, throttled Alpha Vantage Global Quote fallback and no simulated prices.
+- Daily movement cards with Yahoo/Alpha Vantage provider and error messages and simple rule-based buy/hold/sell-style signals.
 - Portfolio KPI cards for performance, daily value at risk, beta, Sharpe ratio, and max drawdown.
 - Interactive portfolio performance SVG line chart with period controls and hover daily values.
 - Dedicated stock analysis page with selectable periods, hover daily values, close price, 20-day moving average, and Bollinger Bands.
@@ -53,15 +53,15 @@ See [`DEPLOYMENT.md`](./DEPLOYMENT.md) for step-by-step instructions and privacy
 
 ## Data-source notes
 
-The MVP uses browser-based Alpha Vantage TIME_SERIES_DAILY for prices, GLOBAL_QUOTE as a latest-price fallback, and optional NEWS_SENTIMENT for financial news. Save the free API key locally in the browser; do not commit API keys to source code.
+The MVP uses exact-ticker Yahoo chart data for up to one year, then a cached and one-request-per-second Alpha Vantage GLOBAL_QUOTE fallback. Alpha Vantage news is not fetched automatically so the free quota is preserved for prices.
 
 Potential future optional providers:
 
-- Alpha Vantage for daily prices and financial news sentiment.
+- Alpha Vantage is used only as an optional latest-price fallback to preserve the free request quota.
 - Finnhub or other providers can be added later for alternative quotes, fundamentals, and news.
 
 Do not paste real API keys into the app, README, frontend code, or committed `.env` files.
 
 ## Disclaimer
 
-Signals and KPIs are educational decision-support indicators, not personalized financial advice. Quotes use Alpha Vantage when a local browser API key is configured. If no Alpha Vantage price is available, the app shows no price rather than simulated data; confirm market data with your broker or a trusted financial-data provider before making investment decisions.
+Signals and KPIs are educational decision-support indicators, not personalized financial advice. Quotes use exact-ticker Yahoo data first and an optional throttled Alpha Vantage fallback. If neither source returns a price, the app shows no price rather than simulated data; confirm market data with your broker or a trusted financial-data provider before making investment decisions.

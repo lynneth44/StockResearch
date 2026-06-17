@@ -1,12 +1,13 @@
 const HOLDINGS_KEY = 'stockresearch.holdings.v1';
 const API_KEY_STORAGE_KEY = 'stockresearch.alphaVantageApiKey.v1';
+const QUOTE_CACHE_KEY = 'stockresearch.quoteCache.v1';
+const QUOTE_CACHE_TTL_MS = 15 * 60 * 1000;
 const RISK_FREE_RATE = 0.025;
-const APP_VERSION = '2026-06-17 Alpha Vantage diagnostics update';
+const APP_VERSION = '2026-06-17 Yahoo primary + throttled Alpha Vantage fallback';
 const starterHoldings = [{ id: crypto.randomUUID(), ticker: 'AAPL' }, { id: crypto.randomUUID(), ticker: 'MSFT' }, { id: crypto.randomUUID(), ticker: 'NVDA' }];
 
 let holdings = loadHoldings();
 let snapshots = {};
-let newsItems = [];
 let priceErrors = {};
 let appMessages = [];
 let isLoading = false;
@@ -16,7 +17,8 @@ let route = location.hash === '#analysis' ? 'analysis' : 'dashboard';
 let newsTab = 'portfolio';
 let portfolioPeriod = '1m';
 let analysisPeriod = '6m';
-const PERIODS = ['1d', '1w', '1m', '6m', '1y', '5y'];
+let lastAlphaVantageRequestAt = 0;
+const PERIODS = ['1d', '1m', '6m', '1y'];
 const chartRegistry = new Map();
 
 const app = document.querySelector('#app');
@@ -59,6 +61,79 @@ function alphaVantageUrl(params) {
   return url;
 }
 
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function loadQuoteCache() {
+  try {
+    return JSON.parse(localStorage.getItem(QUOTE_CACHE_KEY) ?? '{}');
+  } catch {
+    return {};
+  }
+}
+
+function getCachedQuote(ticker) {
+  const cached = loadQuoteCache()[ticker];
+  if (!cached || Date.now() - cached.cachedAt > QUOTE_CACHE_TTL_MS) return null;
+  return cached.snapshot;
+}
+
+function saveCachedQuote(ticker, snapshot) {
+  const cache = loadQuoteCache();
+  cache[ticker] = { cachedAt: Date.now(), snapshot };
+  localStorage.setItem(QUOTE_CACHE_KEY, JSON.stringify(cache));
+}
+
+async function throttleAlphaVantage() {
+  const elapsed = Date.now() - lastAlphaVantageRequestAt;
+  if (elapsed < 1100) await sleep(1100 - elapsed);
+  lastAlphaVantageRequestAt = Date.now();
+}
+
+async function fetchYahooHistory(ticker) {
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?range=1y&interval=1d`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      setPriceError(ticker, `Yahoo Finance HTTP error ${response.status}; trying Alpha Vantage fallback.`);
+      return null;
+    }
+    const payload = await response.json();
+    const result = payload?.chart?.result?.[0];
+    const timestamps = result?.timestamp;
+    const closes = result?.indicators?.quote?.[0]?.close;
+    const meta = result?.meta;
+    if (!timestamps?.length || !closes?.length || !meta?.regularMarketPrice) {
+      setPriceError(ticker, 'Yahoo Finance returned no valid chart data; trying Alpha Vantage fallback.');
+      return null;
+    }
+    const history = timestamps
+      .map((timestamp, index) => ({ date: new Date(timestamp * 1000).toISOString().slice(0, 10), close: closes[index] }))
+      .filter((point) => Number.isFinite(point.close))
+      .map((point) => ({ ...point, close: Number(point.close.toFixed(2)) }));
+    const price = Number(meta.regularMarketPrice.toFixed(2));
+    const previousClose = Number((meta.chartPreviousClose ?? history.at(-2)?.close ?? price).toFixed(2));
+    const snapshot = {
+      ticker,
+      quoteSymbol: ticker,
+      currency: meta.currency ?? 'USD',
+      price,
+      previousClose,
+      changePercent: previousClose ? Number((((price - previousClose) / previousClose) * 100).toFixed(2)) : 0,
+      history,
+      source: `Yahoo Finance exact ticker (${ticker}, ${meta.currency ?? 'USD'})`,
+      updatedAt: new Date().toISOString(),
+    };
+    delete priceErrors[ticker];
+    saveCachedQuote(ticker, snapshot);
+    return snapshot;
+  } catch (error) {
+    setPriceError(ticker, `Yahoo Finance network/CORS error: ${error.message}. Trying Alpha Vantage fallback.`);
+    return null;
+  }
+}
+
 function addFeedback(type, text) {
   appMessages = [{ type, text, at: new Date().toISOString() }, ...appMessages].slice(0, 6);
 }
@@ -67,57 +142,13 @@ function setPriceError(ticker, error) {
   priceErrors[ticker] = error;
 }
 
-async function fetchAlphaVantageDaily(ticker) {
-  if (!alphaVantageApiKey) {
-    setPriceError(ticker, 'No Alpha Vantage API key saved in this browser.');
-    return null;
-  }
-  const url = alphaVantageUrl({ function: 'TIME_SERIES_DAILY', symbol: ticker, outputsize: 'full' });
-  const response = await fetch(url);
-  if (!response.ok) {
-    setPriceError(ticker, `Alpha Vantage HTTP error ${response.status}.`);
-    return null;
-  }
-  const payload = await response.json();
-  const apiMessage = payload.Note || payload.Information || payload['Error Message'];
-  if (apiMessage) {
-    setPriceError(ticker, apiMessage);
-    return await fetchAlphaVantageGlobalQuote(ticker);
-  }
-  const series = payload['Time Series (Daily)'];
-  if (!series) {
-    setPriceError(ticker, 'Alpha Vantage response did not include Time Series (Daily). Trying Global Quote fallback.');
-    return await fetchAlphaVantageGlobalQuote(ticker);
-  }
-
-  const history = Object.entries(series)
-    .map(([date, values]) => ({ date, close: Number(values['4. close']) }))
-    .filter((point) => Number.isFinite(point.close))
-    .sort((a, b) => a.date.localeCompare(b.date));
-
-  const latest = history.at(-1);
-  const previous = history.at(-2) ?? latest;
-  if (!latest) {
-    setPriceError(ticker, 'Alpha Vantage returned no daily close prices.');
-    return await fetchAlphaVantageGlobalQuote(ticker);
-  }
-
-  return {
-    ticker,
-    quoteSymbol: ticker,
-    currency: 'native',
-    price: Number(latest.close.toFixed(2)),
-    previousClose: Number(previous.close.toFixed(2)),
-    changePercent: previous.close ? Number((((latest.close - previous.close) / previous.close) * 100).toFixed(2)) : 0,
-    history,
-    source: `Alpha Vantage TIME_SERIES_DAILY (${ticker})`,
-    updatedAt: new Date().toISOString(),
-  };
-}
-
 async function fetchAlphaVantageGlobalQuote(ticker) {
-  if (!alphaVantageApiKey) return null;
+  if (!alphaVantageApiKey) {
+    setPriceError(ticker, `${priceErrors[ticker] ?? 'Yahoo unavailable'} Alpha Vantage fallback cannot run because no API key is saved.`);
+    return null;
+  }
   try {
+    await throttleAlphaVantage();
     const url = alphaVantageUrl({ function: 'GLOBAL_QUOTE', symbol: ticker });
     const response = await fetch(url);
     if (!response.ok) {
@@ -140,11 +171,10 @@ async function fetchAlphaVantageGlobalQuote(ticker) {
     }
     const previousDate = new Date(tradingDay);
     previousDate.setDate(previousDate.getDate() - 1);
-    delete priceErrors[ticker];
-    return {
+    const snapshot = {
       ticker,
       quoteSymbol: ticker,
-      currency: 'native',
+      currency: 'USD',
       price: Number(price.toFixed(2)),
       previousClose: Number(previousClose.toFixed(2)),
       changePercent: previousClose ? Number((((price - previousClose) / previousClose) * 100).toFixed(2)) : 0,
@@ -152,71 +182,31 @@ async function fetchAlphaVantageGlobalQuote(ticker) {
         { date: previousDate.toISOString().slice(0, 10), close: Number(previousClose.toFixed(2)) },
         { date: tradingDay, close: Number(price.toFixed(2)) },
       ],
-      source: `Alpha Vantage GLOBAL_QUOTE (${ticker})`,
+      source: `Alpha Vantage GLOBAL_QUOTE fallback (${ticker})`,
       updatedAt: new Date().toISOString(),
     };
+    delete priceErrors[ticker];
+    saveCachedQuote(ticker, snapshot);
+    return snapshot;
   } catch (error) {
     setPriceError(ticker, `Network/CORS error while loading Global Quote: ${error.message}`);
     return null;
   }
 }
 
-async function getQuoteSnapshot(ticker) {
-  try {
-    const snapshot = await fetchAlphaVantageDaily(ticker);
-    if (snapshot) delete priceErrors[ticker];
-    return snapshot;
-  } catch (error) {
-    setPriceError(ticker, `Network/CORS error while loading daily prices: ${error.message}`);
+async function getQuoteSnapshot(ticker, allowAlphaFallback = true) {
+  const cached = getCachedQuote(ticker);
+  if (cached) {
+    delete priceErrors[ticker];
+    return { ...cached, source: `${cached.source} · cached` };
+  }
+  const yahoo = await fetchYahooHistory(ticker);
+  if (yahoo) return yahoo;
+  if (!allowAlphaFallback) {
+    setPriceError(ticker, `${priceErrors[ticker] ?? 'Yahoo unavailable'} Alpha Vantage fallback skipped for benchmark to preserve quota.`);
     return null;
   }
-}
-
-async function fetchAlphaVantageNews(tickers) {
-  if (!alphaVantageApiKey || !tickers.length) return [];
-  try {
-    const url = alphaVantageUrl({ function: 'NEWS_SENTIMENT', tickers: tickers.slice(0, 10).join(','), limit: '24' });
-    const response = await fetch(url);
-    if (!response.ok) return [];
-    const payload = await response.json();
-    if (!Array.isArray(payload.feed)) return [];
-    return payload.feed.slice(0, 12).map((item, index) => ({
-      id: item.url ?? `alpha-vantage-news-${index}`,
-      title: item.title ?? 'Alpha Vantage market news',
-      source: item.source ?? 'Alpha Vantage news sentiment',
-      url: item.url ?? 'https://www.alphavantage.co/',
-      publishedAt: parseAlphaVantageDate(item.time_published) ?? new Date().toISOString(),
-      eventDate: parseAlphaVantageDate(item.time_published) ?? new Date().toISOString(),
-      summary: item.summary ?? 'Alpha Vantage returned a news item without a summary.',
-      analystForecast: item.overall_sentiment_label ? `Alpha Vantage sentiment label: ${item.overall_sentiment_label}. Use this as a first-pass sentiment signal, then validate the article details.` : 'No sentiment label returned. Review the linked article and compare it with earnings and guidance expectations.',
-      portfolioImpact: 'This news item matched one or more portfolio tickers through Alpha Vantage. Review whether it changes revenue, margin, valuation, guidance, or sector sentiment assumptions.',
-      potentialImpact: item.overall_sentiment_score ? `Overall sentiment score: ${item.overall_sentiment_score}. Positive scores can support momentum; negative scores can warn of downside pressure.` : 'Potential impact depends on whether the story affects fundamentals, valuation, or risk appetite.',
-      relatedTickers: extractNewsTickers(item),
-      category: 'portfolio',
-    }));
-  } catch {
-    return [];
-  }
-}
-
-function parseAlphaVantageDate(value) {
-  if (!value || value.length < 8) return null;
-  const iso = `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}T${value.slice(9, 11) || '00'}:${value.slice(11, 13) || '00'}:00Z`;
-  return new Date(iso).toISOString();
-}
-
-function extractNewsTickers(item) {
-  if (!Array.isArray(item.ticker_sentiment)) return [];
-  return item.ticker_sentiment.map((ticker) => ticker.ticker).filter(Boolean).slice(0, 5);
-}
-
-function average(values) {
-  return values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
-}
-
-function standardDeviation(values) {
-  const mean = average(values);
-  return Math.sqrt(average(values.map((value) => (value - mean) ** 2)));
+  return await fetchAlphaVantageGlobalQuote(ticker);
 }
 
 function calculateReturns(values) {
@@ -265,7 +255,7 @@ function calculateMaxDrawdown(values) {
 }
 
 function currency(value) {
-  return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(value);
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value);
 }
 
 function formatDate(value) {
@@ -292,7 +282,7 @@ function buildSignal(snapshot) {
 }
 
 function daysForPeriod(period) {
-  return { '1d': 1, '1w': 7, '1m': 31, '6m': 183, '1y': 366, '5y': 365 * 5 }[period] ?? 31;
+  return { '1d': 2, '1m': 31, '6m': 183, '1y': 366 }[period] ?? 31;
 }
 
 function filterSeriesByPeriod(series, period) {
@@ -356,7 +346,6 @@ function bollingerBands(points, windowSize = 20, multiplier = 2) {
 
 function buildNews(tickers) {
   const now = new Date();
-  const alphaVantageItems = newsItems.length ? newsItems : [];
   const freeNewsSources = [
     { name: 'Yahoo Finance', url: (ticker) => `https://finance.yahoo.com/quote/${encodeURIComponent(ticker)}/news` },
     { name: 'Google News', url: (ticker) => `https://news.google.com/search?q=${encodeURIComponent(`${ticker} stock news`)}` },
@@ -389,7 +378,7 @@ function buildNews(tickers) {
     { id: 'earnings-calendar', title: 'Earnings season and company guidance calendar', source: 'Nasdaq earnings calendar', url: 'https://www.nasdaq.com/market-activity/earnings', publishedAt: now.toISOString(), eventDate: now.toISOString(), summary: 'Track upcoming earnings reports because guidance changes often drive the largest single-stock moves. Focus on revenue growth, operating margin, free cash flow, backlog, customer demand, and management commentary.', analystForecast: 'Analysts compare reported EPS and revenue with consensus and then revise price targets based on guidance quality and margin direction.', portfolioImpact: 'If multiple holdings report in the same week, earnings season can increase portfolio-level volatility and daily VaR.', potentialImpact: 'Positive guidance can support momentum; weak guidance can trigger sharp drawdowns even when headline EPS beats.', category: 'macro' },
     { id: 'oil-dollar', title: 'Oil prices and U.S. dollar market pulse', source: 'MarketWatch market data', url: 'https://www.marketwatch.com/markets', publishedAt: now.toISOString(), eventDate: now.toISOString(), summary: 'Watch oil and the U.S. dollar because they influence inflation expectations, multinational earnings translation, energy-sector margins, and risk sentiment. A stronger dollar can weigh on non-U.S. revenue translation for global companies.', analystForecast: 'Analysts track whether commodity and FX moves are temporary or likely to affect margins, input costs, and reported earnings.', portfolioImpact: 'Dollar strength can pressure exporters and global tech earnings, while oil spikes can affect consumer spending and inflation expectations.', potentialImpact: 'Commodity and FX shocks can create broad market volatility even without company-specific news.', category: 'macro' },
   ];
-  return [...alphaVantageItems, ...portfolioNews, ...macroNews];
+  return [...portfolioNews, ...macroNews];
 }
 
 async function loadQuotes() {
@@ -397,12 +386,16 @@ async function loadQuotes() {
   priceErrors = {};
   render();
   const tickers = Array.from(new Set([...getTickers(), 'SPY']));
-  const entries = await Promise.all(tickers.map(async (symbol) => [symbol, await getQuoteSnapshot(symbol)]));
+  const entries = [];
+  for (const symbol of tickers) {
+    entries.push([symbol, await getQuoteSnapshot(symbol, symbol !== 'SPY')]);
+  }
   snapshots = Object.fromEntries(entries);
-  newsItems = await fetchAlphaVantageNews(getTickers());
   const requested = getTickers().length;
   const loaded = getTickers().filter((ticker) => snapshots[ticker]).length;
-  addFeedback(loaded ? 'success' : 'warning', `Loaded ${loaded}/${requested} portfolio prices from Alpha Vantage.`);
+  const yahooLoaded = getTickers().filter((ticker) => snapshots[ticker]?.source?.includes('Yahoo')).length;
+  const alphaLoaded = getTickers().filter((ticker) => snapshots[ticker]?.source?.includes('Alpha Vantage')).length;
+  addFeedback(loaded ? 'success' : 'warning', `Loaded ${loaded}/${requested} prices: ${yahooLoaded} Yahoo, ${alphaLoaded} Alpha Vantage fallback.`);
   isLoading = false;
   render();
 }
@@ -417,7 +410,7 @@ function addHolding(event) {
   holdings = [...holdings, { id: crypto.randomUUID(), ticker, shares: shares > 0 ? shares : undefined, averageCost: averageCost > 0 ? averageCost : undefined }];
   selectedTicker = ticker;
   saveHoldings();
-  addFeedback('success', `${ticker} added. Loading Alpha Vantage data.`);
+  addFeedback('success', `${ticker} added. Loading Yahoo price with throttled Alpha Vantage fallback.`);
   event.currentTarget.reset();
   loadQuotes();
 }
@@ -435,16 +428,16 @@ function saveAlphaVantageApiKey(event) {
   alphaVantageApiKey = String(formData.get('alphaVantageApiKey') ?? '').trim();
   if (alphaVantageApiKey) {
     localStorage.setItem(API_KEY_STORAGE_KEY, alphaVantageApiKey);
-    addFeedback('success', 'Alpha Vantage API key saved locally. Reloading prices now.');
+    addFeedback('success', 'Alpha Vantage fallback key saved locally. Reloading provider chain now.');
   } else {
     localStorage.removeItem(API_KEY_STORAGE_KEY);
-    addFeedback('warning', 'Alpha Vantage API key removed. Prices will not load until a key is saved.');
+    addFeedback('warning', 'Alpha Vantage fallback key removed. Yahoo Finance will remain the primary price source.');
   }
   loadQuotes();
 }
 
 function exportHoldings() {
-  const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), currency: 'EUR', quoteMode: 'direct-eur-preferred', holdings }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), currency: 'USD', quoteMode: 'usd-provider-chain', holdings }, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
@@ -475,11 +468,11 @@ function renderDashboard(tickers, series, kpis, portfolioValue, costBasis, unrea
   return `
     <section class="hero">
       <div>
-        <p class="eyebrow">EUR dashboard · static MVP · no paid API required</p><p class="release-note">Updated: ${APP_VERSION}</p>
+        <p class="eyebrow">USD dashboard · Yahoo primary · no simulated prices</p><p class="release-note">Updated: ${APP_VERSION}</p>
         <h1>StockResearch portfolio and market briefing</h1>
         <p class="hero-copy">Track ticker-only watchlists or optional holdings, review live-quote performance, monitor risk KPIs, and use transparent signals as decision support.</p>
       </div>
-      <div class="privacy-card"><strong>🛡️ Alpha Vantage data mode</strong><span>Prices now come from Alpha Vantage when an API key is saved locally. If no price is available, the dashboard shows no price instead of simulated data.</span></div>
+      <div class="privacy-card"><strong>🛡️ USD provider chain</strong><span>Exact-ticker Yahoo data is tried first. Alpha Vantage Global Quote is a throttled fallback. No simulated prices are used.</span></div>
     </section>
     ${renderFeedback()}
     <section class="grid summary-grid" aria-label="Portfolio summary">
@@ -490,11 +483,11 @@ function renderDashboard(tickers, series, kpis, portfolioValue, costBasis, unrea
       ${summaryCard('Sharpe ratio', kpis.sharpe.toFixed(2), 'Risk-adjusted return estimate.')}
       ${summaryCard('Beta vs SPY', kpis.beta.toFixed(2), 'Sensitivity versus broad U.S. equity proxy.')}
       ${summaryCard('Max drawdown', `${kpis.maxDrawdown.toFixed(1)}%`, 'Worst historical peak-to-trough move.')}
-      ${summaryCard('Data status', isLoading ? 'Loading' : 'Ready', 'Alpha Vantage only; no simulated prices.')}
+      ${summaryCard('Data status', isLoading ? 'Loading' : 'Ready', 'Yahoo primary, throttled Alpha Vantage fallback; no simulations.')}
     </section>
     <section class="panel two-column">
       <div>
-        <h2>Add ticker or holding</h2><p class="muted">Only ticker is required. Shares and average cost are optional. Average cost should be entered in EUR for accurate performance tracking.</p>
+        <h2>Add ticker or holding</h2><p class="muted">Only ticker is required. Shares and average cost are optional. Average cost should be entered in USD for accurate performance tracking.</p>
         <form class="holding-form" id="holding-form">
           <label>Ticker<input name="ticker" placeholder="e.g. AAPL" /></label>
           <label>Shares optional<input name="shares" type="number" min="0" step="any" placeholder="e.g. 10" /></label>
@@ -502,9 +495,9 @@ function renderDashboard(tickers, series, kpis, portfolioValue, costBasis, unrea
           <button type="submit">＋ Add</button>
         </form>
       </div>
-      <div class="actions-card"><h3>Alpha Vantage API key</h3><p class="muted">Save a free Alpha Vantage key locally in this browser. It is not committed to GitHub.</p><form id="api-key-form" class="api-key-form"><input name="alphaVantageApiKey" type="password" value="${escapeHtml(alphaVantageApiKey)}" placeholder="Alpha Vantage API key" /><button type="submit">Save key</button></form><ul><li>No simulated prices are shown when data is unavailable.</li><li>Do not paste API keys into source code.</li><li>Export creates a local backup file.</li></ul><button class="secondary" id="export-button" type="button">⬇ Export local data</button></div>
+      <div class="actions-card"><h3>Alpha Vantage fallback key</h3><p class="muted">Optional fallback only. Yahoo is tried first. The key stays in this browser and is not committed.</p><form id="api-key-form" class="api-key-form"><input name="alphaVantageApiKey" type="password" value="${escapeHtml(alphaVantageApiKey)}" placeholder="Alpha Vantage API key" /><button type="submit">Save key</button></form><ul><li>No simulated prices are shown when data is unavailable.</li><li>Do not paste API keys into source code.</li><li>Export creates a local backup file.</li></ul><button class="secondary" id="export-button" type="button">⬇ Export local data</button></div>
     </section>
-    <section class="panel"><div class="section-heading"><div><h2>Portfolio technical performance</h2><p class="muted">Historical portfolio line chart using optional shares; ticker-only entries are weighted as one unit each. Hover the chart to inspect daily values.</p></div>${renderPeriodControls(portfolioPeriod, 'portfolio')}</div>${renderLineChart(filterSeriesByPeriod(series, portfolioPeriod), { title: `Portfolio value in EUR · ${portfolioPeriod.toUpperCase()}`, valuePrefix: '€', chartId: 'portfolio-value' })}</section>
+    <section class="panel"><div class="section-heading"><div><h2>Portfolio technical performance</h2><p class="muted">Historical portfolio line chart using optional shares; ticker-only entries are weighted as one unit each. Hover the chart to inspect daily values.</p></div>${renderPeriodControls(portfolioPeriod, 'portfolio')}</div>${renderLineChart(filterSeriesByPeriod(series, portfolioPeriod), { title: `Portfolio value in USD · ${portfolioPeriod.toUpperCase()}`, valuePrefix: '$', chartId: 'portfolio-value' })}</section>
     <section class="panel"><div class="section-heading"><div><h2>Portfolio tracker and signals</h2><p class="muted">Signals are rule-based educational indicators, not financial advice.</p></div></div><div class="stock-grid">${holdings.map(renderStockCard).join('')}</div></section>
     <section class="panel"><div class="section-heading"><div><h2>📰 Market and portfolio news briefing</h2><p class="muted">Longer summaries with publish date, event date, analyst forecast, and portfolio impact.</p></div></div><div class="news-tabs"><button class="tab-button ${newsTab === 'portfolio' ? 'active' : ''}" data-news-tab="portfolio" type="button">Stock news (${news.filter((item) => item.category === 'portfolio').length})</button><button class="tab-button ${newsTab === 'macro' ? 'active' : ''}" data-news-tab="macro" type="button">Economic news (${news.filter((item) => item.category === 'macro').length})</button></div><div class="news-list scrollable-news">${filteredNews.map(renderNewsItem).join('')}</div></section>
     <footer>This app provides informational signals only. Confirm data against your broker or a trusted financial-data provider before making investment decisions.<br><strong>${APP_VERSION}</strong></footer>`;
@@ -515,8 +508,8 @@ function renderAnalysisPage(tickers) {
   const snapshot = snapshots[selectedTicker] ?? snapshots[tickers[0]];
   return `
     <section class="hero compact-hero"><div><p class="eyebrow">Technical analysis</p><h1>Stock analysis chart</h1><p class="hero-copy">Analyze one portfolio stock with close price, 20-day moving average, and Bollinger Bands on a dedicated second page.</p></div></section>
-    <section class="panel analysis-controls"><label>Select portfolio stock<select id="ticker-select">${options}</select></label><div>${renderPeriodControls(analysisPeriod, 'analysis')}</div><p class="muted">Prices use Alpha Vantage daily time series. If Alpha Vantage has no data, no price is shown. Hover the chart to inspect daily values.</p></section>
-    <section class="panel">${snapshot ? renderTechnicalChart(snapshot, analysisPeriod) : '<p class="muted">No price history available. Save an Alpha Vantage API key and confirm the ticker symbol is supported.</p>'}</section>`;
+    <section class="panel analysis-controls"><label>Select portfolio stock<select id="ticker-select">${options}</select></label><div>${renderPeriodControls(analysisPeriod, 'analysis')}</div><p class="muted">Charts use exact-ticker Yahoo one-year history. Alpha Vantage Global Quote is used only if Yahoo fails. If both fail, no price is shown. Hover the chart to inspect daily values.</p></section>
+    <section class="panel">${snapshot ? renderTechnicalChart(snapshot, analysisPeriod) : '<p class="muted">No price history available. Review the diagnostics above, confirm the exact ticker, and optionally save an Alpha Vantage fallback key.</p>'}</section>`;
 }
 
 function bindEvents() {
@@ -554,7 +547,7 @@ function bindChartTooltip(container) {
 }
 
 function renderFeedback() {
-  const errorItems = Object.entries(priceErrors).map(([ticker, error]) => ({ type: 'error', text: `${ticker}: ${error}` }));
+  const errorItems = Object.entries(priceErrors).filter(([ticker]) => ticker !== 'SPY').map(([ticker, error]) => ({ type: 'error', text: `${ticker}: ${error}` }));
   const items = [...errorItems, ...appMessages];
   if (!items.length) return '';
   return `<section class="feedback-panel" aria-live="polite">${items.map((item) => `<div class="feedback-item ${escapeHtml(item.type)}"><strong>${escapeHtml(item.type.toUpperCase())}</strong><span>${escapeHtml(item.text)}</span></div>`).join('')}</section>`;
@@ -569,7 +562,7 @@ function renderStockCard(holding) {
   const signal = snapshot ? buildSignal(snapshot) : null;
   const value = snapshot && holding.shares ? snapshot.price * holding.shares : null;
   return `<article class="stock-card">
-    <div class="stock-card-header"><div><h3>${escapeHtml(holding.ticker)}</h3><span>${escapeHtml(snapshot?.source ?? priceErrors[holding.ticker] ?? (alphaVantageApiKey ? 'No price available from Alpha Vantage' : 'Add Alpha Vantage API key to load prices'))}</span></div><button class="icon-button" type="button" aria-label="Remove ${escapeHtml(holding.ticker)}" data-remove="${escapeHtml(holding.id)}">🗑</button></div>
+    <div class="stock-card-header"><div><h3>${escapeHtml(holding.ticker)}</h3><span>${escapeHtml(snapshot?.source ?? priceErrors[holding.ticker] ?? (alphaVantageApiKey ? 'No price available from Yahoo or Alpha Vantage' : 'No Yahoo price; optional Alpha Vantage fallback key not set'))}</span></div><button class="icon-button" type="button" aria-label="Remove ${escapeHtml(holding.ticker)}" data-remove="${escapeHtml(holding.id)}">🗑</button></div>
     <div class="price-row"><strong>${snapshot ? currency(snapshot.price) : 'No price'}</strong>${snapshot ? `<span class="${snapshot.changePercent >= 0 ? 'positive' : 'negative'}">${snapshot.changePercent >= 0 ? '+' : ''}${snapshot.changePercent}%</span>` : ''}</div>
     ${value ? `<p class="muted">Position value: ${currency(value)}</p>` : ''}
     ${signal ? `<div class="signal ${signal.tone}"><strong>${escapeHtml(signal.label)}</strong><span>Confidence: ${escapeHtml(signal.confidence)}</span><ul>${signal.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}</ul></div>` : ''}
@@ -615,7 +608,7 @@ function renderTechnicalChart(snapshot, period) {
   const pathFor = (key) => series.filter((point) => typeof point[key] === 'number').map((point, index, filtered) => `${index === 0 ? 'M' : 'L'} ${x(series.indexOf(point)).toFixed(1)} ${y(point[key]).toFixed(1)}`).join(' ');
   const chartId = `technical-${snapshot.ticker}`;
   chartRegistry.set(chartId, series.map((point) => ({ date: point.date, value: point.close })));
-  return `<div class="technical-header"><div><h2>${escapeHtml(snapshot.ticker)} technical chart · ${period.toUpperCase()}</h2><p class="muted">Close price, 20-day moving average, and Bollinger Bands in EUR.</p></div><strong>${currency(series.at(-1)?.close ?? snapshot.price)}</strong></div><div class="legend"><span class="price-dot">Close</span><span class="ma-dot">20D moving average</span><span class="band-dot">Bollinger upper/lower</span></div><div class="chart-wrap interactive-chart" data-chart-id="${escapeHtml(chartId)}"><div class="chart-tooltip" hidden></div><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(snapshot.ticker)} technical chart"><path class="grid-line" d="M ${padding} ${padding} H ${width - padding} M ${padding} ${height / 2} H ${width - padding} M ${padding} ${height - padding} H ${width - padding}"/><path class="band-line" d="${pathFor('upper')}"/><path class="band-line" d="${pathFor('lower')}"/><path class="ma-line" d="${pathFor('ma')}"/><path class="chart-line" d="${pathFor('close')}"/><text x="${padding}" y="${height - 10}" class="chart-axis">${escapeHtml(series[0].date)}</text><text x="${width - padding - 92}" y="${height - 10}" class="chart-axis">${escapeHtml(series.at(-1).date)}</text></svg></div>`;
+  return `<div class="technical-header"><div><h2>${escapeHtml(snapshot.ticker)} technical chart · ${period.toUpperCase()}</h2><p class="muted">Close price, 20-day moving average, and Bollinger Bands in USD.</p></div><strong>${currency(series.at(-1)?.close ?? snapshot.price)}</strong></div><div class="legend"><span class="price-dot">Close</span><span class="ma-dot">20D moving average</span><span class="band-dot">Bollinger upper/lower</span></div><div class="chart-wrap interactive-chart" data-chart-id="${escapeHtml(chartId)}"><div class="chart-tooltip" hidden></div><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(snapshot.ticker)} technical chart"><path class="grid-line" d="M ${padding} ${padding} H ${width - padding} M ${padding} ${height / 2} H ${width - padding} M ${padding} ${height - padding} H ${width - padding}"/><path class="band-line" d="${pathFor('upper')}"/><path class="band-line" d="${pathFor('lower')}"/><path class="ma-line" d="${pathFor('ma')}"/><path class="chart-line" d="${pathFor('close')}"/><text x="${padding}" y="${height - 10}" class="chart-axis">${escapeHtml(series[0].date)}</text><text x="${width - padding - 92}" y="${height - 10}" class="chart-axis">${escapeHtml(series.at(-1).date)}</text></svg></div>`;
 }
 
 render();
