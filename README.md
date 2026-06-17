@@ -14,12 +14,12 @@ A private-first MVP for tracking a stock watchlist or optional portfolio holding
 - Mobile-responsive static dashboard.
 - Ticker-only watchlist mode.
 - Optional shares and average cost for wealth tracking.
-- Direct EUR quote preference for stock prices and portfolio value, with EUR demo fallback data when a browser quote source is unavailable.
+- Exact ticker quote preference for stock prices to avoid wrong exchange aliases, with marked EUR demo fallback data when a browser quote source is unavailable.
 - Daily movement cards with simple rule-based buy/hold/sell-style signals.
 - Portfolio KPI cards for performance, daily value at risk, beta, Sharpe ratio, and max drawdown.
-- Portfolio performance SVG line chart.
-- Dedicated stock analysis page with close price, 20-day moving average, and Bollinger Bands.
-- Scrollable tabbed news briefing with separate stock and economic news, longer abstracts, publish date, event date, analyst forecast, and portfolio impact.
+- Interactive portfolio performance SVG line chart with period controls and hover daily values.
+- Dedicated stock analysis page with selectable periods, hover daily values, close price, 20-day moving average, and Bollinger Bands.
+- Scrollable tabbed news briefing with separate stock and economic news, more briefing items, longer abstracts, publish date, event date, analyst forecast, and portfolio impact.
 - Macro event links for Federal Reserve, BEA, and BLS calendars.
 - Local JSON export for backup.
 
@@ -53,7 +53,7 @@ See [`DEPLOYMENT.md`](./DEPLOYMENT.md) for step-by-step instructions and privacy
 
 ## Data-source notes
 
-The MVP attempts browser-based quote loading and falls back to deterministic demo data when a provider is unavailable. For production-grade decisions, configure an official market-data provider through a server-side job or GitHub Actions secret so API keys are not exposed in browser code.
+The MVP attempts browser-based Yahoo Finance chart endpoint loading and falls back to deterministic demo data when a provider is unavailable. For production-grade decisions, configure an official market-data provider through a server-side job or GitHub Actions secret so API keys are not exposed in browser code.
 
 Potential future optional providers:
 
@@ -64,4 +64,4 @@ Do not paste real API keys into the app, README, frontend code, or committed `.e
 
 ## Disclaimer
 
-Signals and KPIs are educational decision-support indicators, not personalized financial advice. EUR quotes use direct EUR symbols when available and demo EUR fallback data otherwise; confirm market data with your broker or a trusted financial-data provider before making investment decisions.
+Signals and KPIs are educational decision-support indicators, not personalized financial advice. Quotes use the exact ticker first to avoid wrong exchange aliases and demo fallback data only when live browser quotes are unavailable; confirm market data with your broker or a trusted financial-data provider before making investment decisions.
