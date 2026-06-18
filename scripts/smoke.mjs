@@ -12,18 +12,26 @@ globalThis.document = {
   querySelector: (selector) => selector === '#app' ? app : null,
   querySelectorAll: () => [],
 };
-globalThis.fetch = async () => ({
-  ok: true,
-  json: async () => ({
-    chart: {
-      result: [{
-        timestamp: [1749859200, 1749945600, 1750032000],
-        indicators: { quote: [{ close: [100, 102, 101] }] },
-        meta: { regularMarketPrice: 101, chartPreviousClose: 102, currency: 'USD' },
-      }],
-    },
-  }),
-});
+globalThis.fetch = async (url) => {
+  if (String(url).includes('/SPY?')) {
+    return {
+      ok: true,
+      json: async () => ({ chart: { result: [] } }),
+    };
+  }
+  return {
+    ok: true,
+    json: async () => ({
+      chart: {
+        result: [{
+          timestamp: [1749859200, 1749945600, 1750032000],
+          indicators: { quote: [{ close: [100, 102, 101] }] },
+          meta: { regularMarketPrice: 101, chartPreviousClose: 102, currency: 'USD' },
+        }],
+      },
+    }),
+  };
+};
 
 await import('../src/main.js');
 await new Promise((resolve) => setTimeout(resolve, 50));

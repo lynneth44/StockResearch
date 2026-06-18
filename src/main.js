@@ -3,7 +3,7 @@ const API_KEY_STORAGE_KEY = 'stockresearch.alphaVantageApiKey.v1';
 const QUOTE_CACHE_KEY = 'stockresearch.quoteCache.v1';
 const QUOTE_CACHE_TTL_MS = 15 * 60 * 1000;
 const RISK_FREE_RATE = 0.025;
-const APP_VERSION = '2026-06-17 Yahoo primary + throttled Alpha Vantage fallback';
+const APP_VERSION = '2026-06-18 Yahoo primary + benchmark fallback fix';
 const starterHoldings = [{ id: createId(), ticker: 'AAPL' }, { id: createId(), ticker: 'MSFT' }, { id: createId(), ticker: 'NVDA' }];
 
 let holdings = loadHoldings();
@@ -344,7 +344,7 @@ function buildPortfolioSeries() {
 function buildBenchmarkReturns(length) {
   const spy = snapshots.SPY?.history?.map((point) => point.close);
   if (spy?.length) return calculateReturns(spy).slice(-length);
-  return Array.from({ length }, (_, index) => 0.00035 + seededNoise('SPY', index) / 10);
+  return [];
 }
 
 function buildPortfolioKpis(series) {
