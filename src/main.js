@@ -231,6 +231,18 @@ function calculateReturns(values) {
   return values.slice(1).map((value, index) => (value - values[index]) / values[index]).filter(Number.isFinite);
 }
 
+function average(values) {
+  if (!values.length) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function standardDeviation(values) {
+  if (values.length < 2) return 0;
+  const mean = average(values);
+  const variance = average(values.map((value) => (value - mean) ** 2));
+  return Math.sqrt(variance);
+}
+
 function calculateVolatility(values) {
   return standardDeviation(calculateReturns(values)) * 100;
 }

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "python3 -m http.server 5173",
     "build": "node scripts/build.mjs",
-    "check": "node --check src/main.js"
+    "check": "node --check src/main.js && node scripts/smoke.mjs"
   },
   "dependencies": {},
   "devDependencies": {}
