@@ -4,14 +4,14 @@ const QUOTE_CACHE_KEY = 'stockresearch.quoteCache.v1';
 const QUOTE_CACHE_TTL_MS = 15 * 60 * 1000;
 const RISK_FREE_RATE = 0.025;
 const APP_VERSION = '2026-06-17 Yahoo primary + throttled Alpha Vantage fallback';
-const starterHoldings = [{ id: crypto.randomUUID(), ticker: 'AAPL' }, { id: crypto.randomUUID(), ticker: 'MSFT' }, { id: crypto.randomUUID(), ticker: 'NVDA' }];
+const starterHoldings = [{ id: createId(), ticker: 'AAPL' }, { id: createId(), ticker: 'MSFT' }, { id: createId(), ticker: 'NVDA' }];
 
 let holdings = loadHoldings();
 let snapshots = {};
 let priceErrors = {};
 let appMessages = [];
 let isLoading = false;
-let alphaVantageApiKey = localStorage.getItem(API_KEY_STORAGE_KEY) ?? '';
+let alphaVantageApiKey = safeStorageGet(API_KEY_STORAGE_KEY) ?? '';
 let selectedTicker = holdings[0]?.ticker ?? 'AAPL';
 let route = location.hash === '#analysis' ? 'analysis' : 'dashboard';
 let newsTab = 'portfolio';
@@ -23,13 +23,31 @@ const chartRegistry = new Map();
 
 const app = document.querySelector('#app');
 
+
+function createId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `holding-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function safeStorageGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function safeStorageSet(key, value) {
+  try { localStorage.setItem(key, value); return true; } catch { return false; }
+}
+
+function safeStorageRemove(key) {
+  try { localStorage.removeItem(key); } catch { /* Storage may be blocked by browser privacy settings. */ }
+}
+
 window.addEventListener('hashchange', () => {
   route = location.hash === '#analysis' ? 'analysis' : 'dashboard';
   render();
 });
 
 function loadHoldings() {
-  const raw = localStorage.getItem(HOLDINGS_KEY);
+  const raw = safeStorageGet(HOLDINGS_KEY);
   if (!raw) return starterHoldings;
   try {
     return JSON.parse(raw).map((holding) => ({ ...holding, ticker: normalizeTicker(holding.ticker) })).filter((holding) => holding.ticker);
@@ -39,7 +57,7 @@ function loadHoldings() {
 }
 
 function saveHoldings() {
-  localStorage.setItem(HOLDINGS_KEY, JSON.stringify(holdings));
+  safeStorageSet(HOLDINGS_KEY, JSON.stringify(holdings));
 }
 
 function normalizeTicker(ticker) {
@@ -67,7 +85,7 @@ function sleep(milliseconds) {
 
 function loadQuoteCache() {
   try {
-    return JSON.parse(localStorage.getItem(QUOTE_CACHE_KEY) ?? '{}');
+    return JSON.parse(safeStorageGet(QUOTE_CACHE_KEY) ?? '{}');
   } catch {
     return {};
   }
@@ -82,7 +100,7 @@ function getCachedQuote(ticker) {
 function saveCachedQuote(ticker, snapshot) {
   const cache = loadQuoteCache();
   cache[ticker] = { cachedAt: Date.now(), snapshot };
-  localStorage.setItem(QUOTE_CACHE_KEY, JSON.stringify(cache));
+  safeStorageSet(QUOTE_CACHE_KEY, JSON.stringify(cache));
 }
 
 async function throttleAlphaVantage() {
@@ -407,7 +425,7 @@ function addHolding(event) {
   if (!ticker) return;
   const shares = Number(formData.get('shares'));
   const averageCost = Number(formData.get('averageCost'));
-  holdings = [...holdings, { id: crypto.randomUUID(), ticker, shares: shares > 0 ? shares : undefined, averageCost: averageCost > 0 ? averageCost : undefined }];
+  holdings = [...holdings, { id: createId(), ticker, shares: shares > 0 ? shares : undefined, averageCost: averageCost > 0 ? averageCost : undefined }];
   selectedTicker = ticker;
   saveHoldings();
   addFeedback('success', `${ticker} added. Loading Yahoo price with throttled Alpha Vantage fallback.`);
@@ -427,10 +445,10 @@ function saveAlphaVantageApiKey(event) {
   const formData = new FormData(event.currentTarget);
   alphaVantageApiKey = String(formData.get('alphaVantageApiKey') ?? '').trim();
   if (alphaVantageApiKey) {
-    localStorage.setItem(API_KEY_STORAGE_KEY, alphaVantageApiKey);
+    safeStorageSet(API_KEY_STORAGE_KEY, alphaVantageApiKey);
     addFeedback('success', 'Alpha Vantage fallback key saved locally. Reloading provider chain now.');
   } else {
-    localStorage.removeItem(API_KEY_STORAGE_KEY);
+    safeStorageRemove(API_KEY_STORAGE_KEY);
     addFeedback('warning', 'Alpha Vantage fallback key removed. Yahoo Finance will remain the primary price source.');
   }
   loadQuotes();
@@ -611,5 +629,14 @@ function renderTechnicalChart(snapshot, period) {
   return `<div class="technical-header"><div><h2>${escapeHtml(snapshot.ticker)} technical chart · ${period.toUpperCase()}</h2><p class="muted">Close price, 20-day moving average, and Bollinger Bands in USD.</p></div><strong>${currency(series.at(-1)?.close ?? snapshot.price)}</strong></div><div class="legend"><span class="price-dot">Close</span><span class="ma-dot">20D moving average</span><span class="band-dot">Bollinger upper/lower</span></div><div class="chart-wrap interactive-chart" data-chart-id="${escapeHtml(chartId)}"><div class="chart-tooltip" hidden></div><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(snapshot.ticker)} technical chart"><path class="grid-line" d="M ${padding} ${padding} H ${width - padding} M ${padding} ${height / 2} H ${width - padding} M ${padding} ${height - padding} H ${width - padding}"/><path class="band-line" d="${pathFor('upper')}"/><path class="band-line" d="${pathFor('lower')}"/><path class="ma-line" d="${pathFor('ma')}"/><path class="chart-line" d="${pathFor('close')}"/><text x="${padding}" y="${height - 10}" class="chart-axis">${escapeHtml(series[0].date)}</text><text x="${width - padding - 92}" y="${height - 10}" class="chart-axis">${escapeHtml(series.at(-1).date)}</text></svg></div>`;
 }
 
-render();
-loadQuotes();
+async function startApp() {
+  try {
+    render();
+    await loadQuotes();
+  } catch (error) {
+    console.error('StockResearch startup failed', error);
+    app.innerHTML = `<section class="startup-error"><h1>StockResearch could not start</h1><p>${escapeHtml(error?.message ?? error)}</p><p>Refresh the page. If this continues, clear this site's stored data and reload.</p></section>`;
+  }
+}
+
+startApp();

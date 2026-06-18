@@ -544,3 +544,14 @@ select {
 .feedback-item span {
   line-height: 1.45;
 }
+
+.startup-shell,
+.startup-error {
+  max-width: 760px;
+  margin: 4rem auto;
+  padding: 2rem;
+  border-radius: 24px;
+  background: #fff;
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.08);
+}
+.startup-error { border: 1px solid #fecaca; color: #991b1b; }
